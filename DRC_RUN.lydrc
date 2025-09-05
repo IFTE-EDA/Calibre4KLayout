@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="utf-8"?>
+<klayout-macro>
+ <description>SG13G2 Calibre DRC Run</description>
+ <version>0.2</version>
+ <category/>
+ <prolog/>
+ <epilog/>
+ <doc/>
+ <autorun>false</autorun>
+ <autorun-early>false</autorun-early>
+ <priority>0</priority>
+ <shortcut/>
+ <show-in-menu>true</show-in-menu>
+ <group-name>SG13G2 Calibre Tools</group-name>
+ <menu-path>sg13g2_menu&gt;end("SG13G2 PDK").calibre_menu&gt;end("SG13G2 Calibre").end</menu-path>
+ <interpreter>dsl</interpreter>
+ <dsl-interpreter-name>drc-dsl-xml</dsl-interpreter-name>
+ <text>require 'yaml'
+require 'fileutils'
+require_relative 'calibre_universal'
+
+module CalibreDRCRun
+  include RBA
+  extend self  
+
+  # Watch result directory and process DRC output and load into Marker Browser
+  def self.process_results(result_path)
+    target_file = File.join(result_path, "default.drc.results")
+    modified_path = File.join(result_path, "default-modified.drc.results")
+    output_path = File.join(result_path, "default.lyrdb")
+
+    unless File.exist?(target_file)
+      puts "DRC result file not found: #{target_file}"
+      return
+    end
+
+    File.open(target_file, "r") do |input_file|
+      File.open(modified_path, "w") do |output_file|
+        input_file.each_line do |line|
+          output_file.puts(line.include?("Rule File Pathname") ? "" : line)
+        end
+      end
+    end
+
+    app = RBA::Application.instance
+    layout_view = app.main_window.current_view
+    raise "No layout open in KLayout." unless layout_view
+
+    rdb_index = layout_view.create_rdb("Cleaned DRC Results")
+    rdb = layout_view.rdb(rdb_index)
+    rdb.load(modified_path)
+    rdb.save(output_path)
+    puts "Processed DRC results saved to #{output_path}"
+
+    layout_view.show_rdb(rdb_index, layout_view.active_cellview_index)
+    app.main_window.menu.action("tools_menu.browse_markers").trigger
+  end
+
+  # Execute the main process
+  def run
+    #Load CalibreDRCConfig.yml from calibre_universal
+    config          = CalibreUniversal.load_config(CalibreUniversal::CONFIG_FILE_PATH)
+    
+    calibre_path    = config["CALIBRE_HOME"]
+    license_path    = config["MGLS_LICENSE_FILE"]
+    pdk_path        = config["IHP_TECH"]
+    drclist_path    = config["MGC_CALIBRE_DRC_RUNSET_LIST"]
+    result_path     = config["SG13_CALIBRE_DRC_RUN"]
+    gui_enabled     = config["ENABLE_GUI"] != false
+    
+    layout_gds_path, top_cell_name = CalibreUniversal.export_layout(result_path)
+    
+    runset_path = config["FINAL_RUNSET_PATH"]
+    if runset_path &amp;&amp; runset_path.include?("$IHP_TECH")
+      runset_path = runset_path.sub("$IHP_TECH", ENV["IHP_TECH"])
+    end
+    
+    selected_label = config["SELECTED_RUNSET_LABEL"].strip
+    manual_runset_path = config["Other Runset"].strip
+    
+    # Construct shell environment commands
+    env_cmds = [
+      "export CALIBRE_HOME='#{calibre_path}'",
+      "export MGLS_LICENSE_FILE='#{license_path}'",
+      "export IHP_TECH='#{pdk_path}'",
+      "export MGC_CALIBRE_DRC_RUNSET_LIST='#{drclist_path}'",
+      "export SG13_CALIBRE_DRC_RUN='#{result_path}'",
+      "export SG13_CALIBRE_FILL_RUN='#{result_path}'"
+    ].join(" &amp;&amp; ")
+    
+    runset_override = File.join(__dir__, "sg13_drc.runset")
+    drc_cmd = if gui_enabled
+                "calibre -gui -drc -runset '#{runset_path} #{runset_override}'"
+              else
+                "calibre -gui -drc -runset '#{runset_path} #{runset_override}' -batch "
+              end
+    
+    final_cmd = "#{env_cmds} &amp;&amp; #{drc_cmd}"
+    puts "Running command:\n#{final_cmd}"
+    
+    system("bash -l -c \"#{final_cmd}\"")
+    
+    #if selected_label == "Filler Generation" &amp;&amp; (manual_runset_path.nil? || manual_runset_path.empty?)
+    # Determine which Runset is used and merge the fillers.gds into current layout if needed
+    uses_gds = false
+    
+    if runset_path &amp;&amp; File.exist?(runset_path)
+      puts "\n[INFO] Checking for .gds references in #{runset_path}..."
+      File.foreach(runset_path) do |line|
+        if line.include?(".gds")
+          puts "[GDS Reference] #{line.strip}"
+          uses_gds = true
+        end
+      end
+    else
+      puts "[WARNING] Runset file does not exist or is nil: #{runset_path.inspect}"
+    end
+    
+    if uses_gds
+      # Without processing the results, open .gds file directly
+      #fillers_path = File.join(result_path, "fillers.gds")
+      gds_path = Dir.glob(File.join(result_path, "*.gds"))
+      fillers_path = gds_path.max_by{|f| File.mtime(f)}
+      puts "[INFO] Using latest .gds file: #{fillers_path}"
+      if File.exist?(fillers_path)
+        app = RBA::Application.instance
+        main_window = app.main_window
+        manager = main_window.manager
+        layout_view = main_window.current_view
+        raise "No layout open in KLayout." unless layout_view
+    
+        cellview = layout_view.cellview(layout_view.active_cellview_index)
+        current_layout = cellview.layout
+        raise "No layout found in the current cellview." unless current_layout
+  # --------------------------------------------------------------------------------------------------
+  #The first method of adding .gds merges the original Layout and the added gds structure into a Topcell and the original Layout is rendered as a subcell.
+  
+        # Merge fillers.gds directly into the current layout
+        #manager.transaction("Import fillers.gds")
+        #begin
+          #orig_top      = current_layout.top_cells.first          
+          #orig_top_name = orig_top.name
+          #fill_name     = "#{orig_top_name}_fill"
+          #fill_cell     = current_layout.cell(fill_name) || current_layout.create_cell(fill_name)
+          #fill_cell.read(fillers_path)
+    
+          #fill_cell = current_layout.cell(fill_name)
+          #if orig_top &amp;&amp; fill_cell
+          #  orig_top.insert(RBA::CellInstArray::new(fill_cell.cell_index, RBA::Trans::new(0, 0)))
+          #end
+    
+          #manager.commit
+        #rescue =&gt; e
+          #layout_view.clear_transactions
+          #raise e
+        #end
+    
+        #layout_view.add_missing_layers
+        #layout_view.max_hier_levels = 3
+        #layout_view.zoom_fit
+  # --------------------------------------------------------------------------------------------------
+  # The second way to add .gds is to keep the Topcell of the original Layout and merge the added gds structure with the original Layout into another Topcell.
+        # Merge fillers.gds directly into the current layout
+        manager.transaction("Import filler top-cells with _fill suffix")
+        begin
+          filler_layout = RBA::Layout.new
+          filler_layout.read(fillers_path)
+        
+          original_top = current_layout.top_cell
+          raise "Original top cell not found!" if original_top.nil?
+        
+          filler_layout.top_cells.each do |fill_top_cell|
+            tgt_name  = "#{fill_top_cell.name}_fill"
+            tgt_cell  = current_layout.cell(tgt_name) ||
+                        current_layout.create_cell(tgt_name)
+        
+            # Create a temporary cell to hold the copied contents of the original layout.
+            copied_original_cell = current_layout.create_cell("#{original_top.name}_copy")
+            copied_original_cell.copy_tree(original_top)
+        
+            # Insert fill content into the target cell
+            tgt_cell.copy_tree(fill_top_cell)
+        
+            # Instantiate the copied original cell into tgt_cell (this does not affect the original cell)
+            tgt_cell.insert(RBA::CellInstArray.new(copied_original_cell.cell_index, RBA::Trans::new))
+          end
+        
+          manager.commit
+        rescue =&gt; e
+          layout_view.clear_transactions
+          raise e
+        end
+        
+        layout_view.add_missing_layers
+        layout_view.zoom_fit
+
+
+    
+        RBA::MessageBox.info("Success", "Fillers imported into current layout.\nNot saved yet.", RBA::MessageBox::Ok)
+      else
+        puts "[WARNING] Fillers file not found at: #{fillers_path}"
+      end
+    else
+      process_results(result_path)
+    end
+
+    # show the errors and warnings dialog
+    CalibreUniversal.show_errors_if_exist(result_path)
+  end 
+end
+
+CalibreDRCRun.run
+</text>
+</klayout-macro>

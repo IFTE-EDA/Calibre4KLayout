@@ -1,0 +1,11 @@
+*lvsLayoutPaths: $LAYOUT_GDS
+*lvsLayoutPrimary: $TOPCELL_NAME
+*lvsLayoutGetFromViewer: 0
+*lvsERCDatabase: default.erc.results
+*lvsSourcePrimary: $TOPCELL_NAME
+*lvsSourcePath: $LVS_NETLIST_PATH
+*lvsSourceGetFromViewer: 0
+*cmnStartRVEAfterBatch: 1
+*cmnCloseRVEonExit: 0
+*cmnErrorEchoToFile: 1
+*cmnErrorFile: errors_and_warnings

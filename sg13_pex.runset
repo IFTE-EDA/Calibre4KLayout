@@ -1,0 +1,14 @@
+*pexLayoutPaths: $LAYOUT_GDS
+*pexLayoutPrimary: $TOPCELL_NAME
+*pexLayoutGetFromViewer: 0
+*pexReportFile: default.lvs.report
+*pexSourcePrimary: $TOPCELL_NAME
+*pexSourcePath: $PEX_NETLIST_PATH
+*pexSourceGetFromViewer: 0
+*pexPexReport: 1
+*cmnStartRVEAfterBatch: 1
+*pexStartRVE: 1
+*pexPostTriggers: {{ihpCellMapGen(list("SG13_dev" "analogLib") "symbol")} schematic 0}
+*cmnCloseRVEonExit: 0
+*cmnErrorEchoToFile: 1
+*cmnErrorFile: errors_and_warnings

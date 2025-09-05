@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<klayout-macro>
+ <description>SG13G2 Calibre LVS Run</description>
+ <version>0.2</version>
+ <category/>
+ <prolog/>
+ <epilog/>
+ <doc/>
+ <autorun>false</autorun>
+ <autorun-early>false</autorun-early>
+ <priority>0</priority>
+ <shortcut/>
+ <show-in-menu>true</show-in-menu>
+ <group-name>SG13G2 Calibre Tools</group-name>
+ <menu-path>sg13g2_menu&gt;end("SG13G2 PDK").calibre_menu&gt;end("SG13G2 Calibre").end</menu-path>
+ <interpreter>dsl</interpreter>
+ <dsl-interpreter-name>lvs-dsl-xml</dsl-interpreter-name>
+ <text>require 'yaml'
+require 'fileutils'
+require_relative 'calibre_universal'
+
+module CalibreLVSRun
+  include RBA
+  extend self       
+
+  # Execute the main process
+  def run
+    #Load CalibreDRCConfig.yml from calibre_universal.rb
+    config          = CalibreUniversal.load_config(CalibreUniversal::CONFIG_FILE_PATH)
+    
+    calibre_path = config["CALIBRE_HOME"]
+    license_path = config["MGLS_LICENSE_FILE"]
+    pdk_path     = config["IHP_TECH"]
+    result_path  = config["SG13_CALIBRE_LVS_RUN"]
+    gui_enabled  = config["ENABLE_GUI"] != false
+    runset_path  = config["MGC_CALIBRE_LVS_RUNSET_FILE"]
+    netlist_path = config["LVS_NETLIST_PATH"]
+
+    ENV["LVS_NETLIST_PATH"] = netlist_path
+
+    layout_gds_path, top_cell_name = CalibreUniversal.export_layout(result_path)
+
+    env_cmds = [
+      "export CALIBRE_HOME='#{calibre_path}'",
+      "export MGLS_LICENSE_FILE='#{license_path}'",
+      "export IHP_TECH='#{pdk_path}'",
+      "export SG13_CALIBRE_LVS_RUN='#{result_path}'",
+      "export LVS_NETLIST_PATH='#{netlist_path}'"
+    ].join(" &amp;&amp; ")
+
+    runset_override = File.join(__dir__, "sg13_lvs.runset")
+    lvs_cmd = if gui_enabled
+                "calibre -gui -lvs -runset '#{runset_path} #{runset_override}'"
+              else
+                "calibre -gui -lvs -runset '#{runset_path} #{runset_override}' -batch"
+              end
+  
+    final_cmd = "#{env_cmds} &amp;&amp; #{lvs_cmd}"
+    puts "Running command:\n#{final_cmd}"
+  
+    system("bash -l -c \"#{final_cmd}\"")
+    puts "Running command:\n#{final_cmd}"
+    
+    # show the errors and warnings dialog
+    CalibreUniversal.show_errors_if_exist(result_path)
+  end
+end
+
+CalibreLVSRun.run
+</text>
+</klayout-macro>

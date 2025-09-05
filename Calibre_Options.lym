@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="utf-8"?>
+<klayout-macro>
+ <description>SG13G2 Calibre Options</description>
+ <version>0.2</version>
+ <category/>
+ <prolog/>
+ <epilog/>
+ <doc/>
+ <autorun>false</autorun>
+ <autorun-early>false</autorun-early>
+ <priority>0</priority>
+ <shortcut/>
+ <show-in-menu>true</show-in-menu>
+ <group-name>SG13G2 Calibre Tools</group-name>
+ <menu-path>sg13g2_menu&gt;end("SG13G2 PDK").calibre_menu&gt;end("SG13G2 Calibre").end</menu-path>
+ <interpreter>ruby</interpreter>
+ <dsl-interpreter-name/>
+ <text>module Calibre_Option
+  require 'yaml'
+  require 'tmpdir'
+  include RBA
+
+  $watcher_started = false
+
+  # --------------------------------------------------------------------------------------------------
+  # Load configuration from a YAML file
+  def self.load_config_from_yaml(file_path)
+    File.exist?(file_path) ? YAML.load_file(file_path) : {}
+  end
+  
+  # Save configuration to a YAML file
+  def self.save_config_to_yaml(file_path, config_hash)
+    File.open(file_path, 'w') { |f| f.write(config_hash.to_yaml) }
+  end
+  
+  # --------------------------------------------------------------------------------------------------
+  # Read environment values from file or ENV
+  config_file_path = File.join(__dir__, "CalibreDRCConfig.yml")
+  config = load_config_from_yaml(config_file_path)
+
+  license_default = config["MGLS_LICENSE_FILE"] || ENV["MGLS_LICENSE_FILE"]
+  calibre_default = config["CALIBRE_HOME"] || ENV["CALIBRE_HOME"]
+  pdk_default = config["IHP_TECH"] || ENV["IHP_TECH"]
+  drclist_default = config["MGC_CALIBRE_DRC_RUNSET_LIST"] || ENV["MGC_CALIBRE_DRC_RUNSET_LIST"]
+  lvs_file_default = config["MGC_CALIBRE_LVS_RUNSET_FILE"] || ENV["MGC_CALIBRE_LVS_RUNSET_FILE"]
+  pex_file_default = config["MGC_CALIBRE_PEX_RUNSET_FILE"] || ENV["MGC_CALIBRE_PEX_RUNSET_FILE"]
+  drc_runset_default = config["Other Runset"]
+  result_default = config["SG13_CALIBRE_DRC_RUN"] || "/tmp"
+  netlist_path_default = config["LVS_NETLIST_PATH"]
+  pex_input_default = config["PEX_NETLIST_PATH"]
+  
+  #puts ENV["CALIBRE_HOME"]
+  #Read drc runset list from environment variables
+  drclist_path = ENV['MGC_CALIBRE_DRC_RUNSET_LIST']
+  runset_options = []
+  if drclist_path &amp;&amp; File.exist?(drclist_path)
+    runset_options = File.readlines(drclist_path).map(&amp;:strip).reject(&amp;:empty?).map do |line|
+      path, key, label = line.strip.split(' ', 3)
+      label = (label || key).gsub(/^\"|\"$/, '') 
+      { path: path, key: key, label: label || key }
+    end
+  end
+
+  # --------------------------------------------------------------------------------------------------
+  # GUI dialog for Calibre DRC configuration
+  dialog = RBA::QDialog.new
+  dialog.windowTitle = "Run Calibre in KLayout"
+  dialog.resize(900, 300)
+  layout = RBA::QVBoxLayout.new(dialog)
+  dialog.setLayout(layout)
+
+  notice = RBA::QLabel.new("&lt;b&gt;&lt;font size='3'&gt;Configure Environment Variables before Running the Script!&lt;/font&gt;&lt;/b&gt;")
+  notice.setAlignment(RBA::Qt::AlignHCenter)
+  layout.addWidget(notice)
+
+  # Utility function to create labeled inputs with optional browse button
+  def self.labeled_input(label_text, default_value, browse_mode = nil, dialog = nil, label_width)
+    layout = RBA::QHBoxLayout.new
+    label = RBA::QLabel.new(label_text)
+    label.setMinimumWidth(label_width)
+    edit = RBA::QLineEdit.new(default_value)
+    button = RBA::QPushButton.new("Browse") if browse_mode
+
+    if browse_mode == :dir
+      button.clicked { edit.text = RBA::QFileDialog.getExistingDirectory(dialog, "Select Folder") }
+    elsif browse_mode == :file
+      button.clicked { edit.text = RBA::QFileDialog.getOpenFileName(dialog, "Select File") }
+    end
+
+    layout.addWidget(label)
+    layout.addWidget(edit)
+    layout.addWidget(button) if button
+    return layout, edit
+  end
+
+  # Input fields
+  label_width = 250
+  license_layout, license_edit = labeled_input("$MGLS_LICENSE_FILE:", license_default, nil, dialog, label_width)
+  calibre_layout, calibre_edit = labeled_input("$CALIBRE_HOME:              ", calibre_default, :dir, dialog, label_width)
+  pdk_layout, pdk_edit = labeled_input("$IHP_TECH:                 ", pdk_default, :dir, dialog, label_width)
+  output_layout, output_edit = labeled_input("$SG13_CALIBRE_DRC_RUN:", result_default, :dir, dialog, label_width)
+  drclist_layout, drclist_edit = labeled_input("$MGC_CALIBRE_DRC_RUNSET_LIST:", drclist_default, :file, dialog, label_width)
+  lvs_layout, lvs_edit = labeled_input("$MGC_CALIBRE_LVS_RUNSET_FILE:", lvs_file_default, :file, dialog, label_width)
+  pex_layout, pex_edit = labeled_input("$MGC_CALIBRE_PEX_RUNSET_FILE:", pex_file_default, :file, dialog, label_width)
+  
+  env_groupbox = RBA::QGroupBox.new("Environment Variables")
+  
+  env_layout = RBA::QVBoxLayout.new
+  env_layout.addLayout(license_layout)
+  env_layout.addLayout(calibre_layout)
+  env_layout.addLayout(pdk_layout)
+  env_layout.addLayout(drclist_layout)
+  env_layout.addLayout(lvs_layout)
+  env_layout.addLayout(pex_layout)
+  env_layout.addLayout(output_layout)
+  env_groupbox.setLayout(env_layout)
+  
+  layout.addWidget(env_groupbox)
+
+  #Runset file selection section
+  #Supports ComboBox to select runset directly from Runset List or user can select runset by Browser
+  #Option1: Select runset through runset list
+  runset_combo = RBA::QComboBox.new
+  runset_map = {}
+  runset_options.each_with_index do |opt, i|
+    runset_combo.addItem(opt[:label])
+    runset_map[opt[:label]] = opt[:path]
+  end
+  
+  if config["SELECTED_RUNSET_LABEL"] &amp;&amp; runset_map[config["SELECTED_RUNSET_LABEL"]]
+  index = runset_combo.findText(config["SELECTED_RUNSET_LABEL"])
+  runset_combo.setCurrentIndex(index) if index &gt;= 0
+  end
+
+  #Option2: Select drc runset by Browser
+  runset_file_layout, runset_file_edit = labeled_input("Other Runset:", drc_runset_default, :file, dialog, label_width)
+  runset_section = RBA::QGroupBox.new("Calibre DRC Configuration")
+  runset_layout = RBA::QVBoxLayout.new(runset_section)
+  combo_row = RBA::QHBoxLayout.new
+  label = RBA::QLabel.new("Select a Runset from List:")
+  label.setSizePolicy(RBA::QSizePolicy::Fixed, RBA::QSizePolicy::Preferred)
+  combo_row.addWidget(label)
+  combo_row.addWidget(runset_combo, 1)
+  combo_row.setSpacing(76)
+  combo_row.addStretch(3)
+  runset_layout.addLayout(combo_row)
+  runset_layout.addLayout(runset_file_layout)
+  layout.addWidget(runset_section)
+
+  # --------------------------------------------------------------------------------------------------
+  # GUI dialog for Calibre LVS configuration
+  netlist_path_layout, netlist_path_edit = labeled_input("LVS Source Netlist:", netlist_path_default, :file, dialog, label_width)
+  lvs_section = RBA::QGroupBox.new("Calibre LVS Configuration")
+  lvs_layout = RBA::QVBoxLayout.new(lvs_section)
+  lvs_layout.addLayout(netlist_path_layout)
+  layout.addWidget(lvs_section)
+  
+  # --------------------------------------------------------------------------------------------------
+  # GUI dialog for Calibre PEX configuration
+  pex_input_layout, pex_input_edit = labeled_input("PEX Source Netlist:", pex_input_default, :file, dialog, label_width)
+  pex_section = RBA::QGroupBox.new("Calibre PEX Configuration")
+  pex_layout = RBA::QVBoxLayout.new(pex_section)
+  pex_layout.addLayout(pex_input_layout)
+  layout.addWidget(pex_section)
+  
+  # --------------------------------------------------------------------------------------------------  
+  #CheckBox
+  gui_checkbox = RBA::QCheckBox.new("Enable Calibre Configuration GUI")
+  gui_checkbox.checked = config["ENABLE_GUI"] != false
+  layout.addWidget(gui_checkbox)
+
+  # --------------------------------------------------------------------------------------------------
+  # Buttons Setting
+  button_layout = RBA::QHBoxLayout.new
+  button_layout.setAlignment(RBA::Qt::AlignCenter)
+  button_layout.setSpacing(20)
+  ok_button = RBA::QPushButton.new("OK")
+  cancel_button = RBA::QPushButton.new("Cancel")
+  reset_button = RBA::QPushButton.new("Reset")
+  cancel_button.clicked { dialog.reject }
+  button_layout.addWidget(ok_button)
+  button_layout.addWidget(reset_button)
+  button_layout.addWidget(cancel_button)
+  layout.addLayout(button_layout)
+  
+  # Reset button logic: reload initial values from ENV or YAML config
+  reset_button.clicked do
+    config = load_config_from_yaml(config_file_path)
+    license_edit.text = config["MGLS_LICENSE_FILE"] || ENV["MGLS_LICENSE_FILE"] || ""
+    calibre_edit.text = config["CALIBRE_HOME"] || ENV["CALIBRE_HOME"] || ""
+    pdk_edit.text = config["IHP_TECH"] || ENV["IHP_TECH"] || ""
+    drclist_edit.text = config["MGC_CALIBRE_DRC_RUNSET_LIST"] || ENV["MGC_CALIBRE_DRC_RUNSET_LIST"] || ""
+    lvs_edit.text = config["MGC_CALIBRE_LVS_RUNSET_FILE"] || ENV["MGC_CALIBRE_LVS_RUNSET_FILE"] || ""
+    pex_edit.text = config["MGC_CALIBRE_PEX_RUNSET_FILE"] || ENV["MGC_CALIBRE_PEX_RUNSET_FILE"] || ""
+    output_edit.text = config["SG13_CALIBRE_DRC_RUN"] || ENV["SG13_CALIBRE_DRC_RUN"] || "" 
+    gui_checkbox.checked = config["ENABLE_GUI"] != false
+    runset_file_edit.text = config["Other Runset"]
+    netlist_path_edit.text = config["LVS_NETLIST_PATH"]
+    pex_input_edit.text = config["PEX_NETLIST_PATH"]
+    
+    if (label = config["SELECTED_RUNSET_LABEL"]) &amp;&amp; (idx = runset_combo.findText(label)) &gt;= 0
+      runset_combo.setCurrentIndex(idx)
+    else
+      runset_combo.setCurrentIndex(0) unless runset_options.empty?
+    end
+  end
+  
+  # OK button logic: prepare environment and run Calibre
+  ok_button.clicked do
+    calibre_path = calibre_edit.text.strip
+    license_string = license_edit.text.strip
+    pdk_path = pdk_edit.text.strip
+    result_path = output_edit.text.strip
+    drclist_path = drclist_edit.text.strip
+    lvs_file_path = lvs_edit.text.strip
+    pex_file_path = pex_edit.text.strip
+    lvs_netlist_path = netlist_path_edit.text.strip
+    pex_netlist_path = pex_input_edit.text.strip
+    gui_enabled = gui_checkbox.isChecked?
+    
+    runset_file_input = runset_file_edit.text.strip
+    runset_selected = runset_combo.currentText.strip
+    runset_path = runset_file_input.empty? ? runset_map[runset_selected] : runset_file_input
+
+    # Save updated config to YAML
+    config_to_save = {
+      "MGLS_LICENSE_FILE" =&gt; license_string,
+      "CALIBRE_HOME" =&gt; calibre_path,
+      "IHP_TECH" =&gt; pdk_path,
+      "MGC_CALIBRE_DRC_RUNSET_LIST" =&gt; drclist_path,
+      "MGC_CALIBRE_LVS_RUNSET_FILE" =&gt; lvs_file_path,
+      "MGC_CALIBRE_PEX_RUNSET_FILE" =&gt; pex_file_path,
+      "LVS_NETLIST_PATH" =&gt; lvs_netlist_path,
+      "PEX_NETLIST_PATH" =&gt; pex_netlist_path,
+      "SG13_CALIBRE_DRC_RUN" =&gt; result_path,
+      "SG13_CALIBRE_LVS_RUN" =&gt; result_path,
+      "SG13_CALIBRE_PEX_RUN" =&gt; result_path,
+      "Other Runset" =&gt; runset_file_input,
+      "SELECTED_RUNSET_LABEL" =&gt; runset_selected,
+      "FINAL_RUNSET_PATH" =&gt; runset_path,
+      "ENABLE_GUI" =&gt; gui_enabled
+    }
+    save_config_to_yaml(config_file_path, config_to_save)
+    puts "Configuration saved to #{config_file_path}"
+    puts "FINAL_RUNSET_PATH = #{runset_path}"
+
+    puts "Current PATH:"
+    puts ENV["PATH"]
+    
+    puts "Current CALIBRE_HOME:"
+    puts ENV["CALIBRE_HOME"]
+
+    dialog.accept
+  end
+  dialog.exec
+end
+</text>
+</klayout-macro>
